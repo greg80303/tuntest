@@ -277,8 +277,12 @@ int main(int argc, char** argv) {
         perror("ERROR Allocating notification socket");
         return -1;
     }
+    if ((genl_sock = nl_socket_alloc()) == NULL) {
+        perror("ERROR Allocating genl socket");
+        return -1;
+    }
     if ((route_sock = nl_socket_alloc()) == NULL) {
-        perror("ERROR Allocating response socket");
+        perror("ERROR Allocating route socket");
         return -1;
     }
 
