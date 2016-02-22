@@ -19,10 +19,16 @@
 #include <netlink/socket.h>
 
 #include <fcntl.h>
+#include <errno.h>
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+
+#define BUFSIZE 2048
+#define TUN_DEV_NAME "tun0"
+
+static uint8_t tunnel_configured = 0;
 
 static int tun_alloc(char *dev) {
     struct ifreq ifr;
@@ -102,6 +108,7 @@ static int configure_tunnel(int if_index, struct nl_sock *msgsock) {
     }
     nlmsg_free(outmsg);
     outmsg = NULL;
+    tunnel_configured = 1;
 
   done:
     if (outmsg) {
@@ -115,11 +122,6 @@ static int configure_tunnel(int if_index, struct nl_sock *msgsock) {
     }
 
     return 0;
-}
-
-static void link_iterator(struct nl_object *obj, void *arg) {
-    struct rtnl_link *link = (struct rtnl_link*)obj;
-    printf("LINK NAME = %s\n", rtnl_link_get_name(link));
 }
 
 static void route_iterator(struct nl_object *obj, void *arg) {
@@ -139,7 +141,16 @@ static void route_iterator(struct nl_object *obj, void *arg) {
     }
 }
 
-static int get_links(struct nl_sock *sock) {
+static void link_iterator(struct nl_object *obj, void *arg) {
+    struct rtnl_link *link = (struct rtnl_link*)obj;
+    if (!strcmp(rtnl_link_get_name(link), TUN_DEV_NAME))
+    {
+        printf("Found tunnel device!  name = %s, index = %d\n", rtnl_link_get_name(link), rtnl_link_get_ifindex(link));
+        *((int*)arg) = rtnl_link_get_ifindex(link);
+    }
+}
+
+static int get_tun_link_index(struct nl_sock *sock) {
     struct nl_cache *links;
 
     if (rtnl_link_alloc_cache(sock, AF_UNSPEC, &links) < 0) {
@@ -149,11 +160,12 @@ static int get_links(struct nl_sock *sock) {
 
     printf("Number of links = %d\n", nl_cache_nitems(links));
 
-    nl_cache_foreach(links, link_iterator, NULL);
+    int index = -1;
+    nl_cache_foreach(links, link_iterator, &index);
 
     nl_cache_free(links);
 
-    return 0;
+    return index;
 }
 
 static int get_routes(struct nl_sock *sock) {
@@ -182,16 +194,18 @@ static int link_notification_cb(struct nl_msg *msg, void *arg) {
     switch (msghdr->nlmsg_type) {
     case RTM_NEWLINK:
     {
-        struct nlattr *name_attr = nla_find(attr, nlmsg_attrlen(msghdr, 0), IFLA_IFNAME);
         printf("Received RTM_NEWLINK msg\n");
-        if (name_attr && strcmp("tun0", nla_get_string(name_attr)) == 0) {
-            printf("This is our 'tun0' tunnel!  Interface index = %d\n", ifmsghdr->ifi_index);
+        if (!tunnel_configured) {
+            printf("Configuring tunnel...\n");
+            struct nlattr *name_attr = nla_find(attr, nlmsg_attrlen(msghdr, 0), IFLA_IFNAME);
+            if (name_attr && strcmp(TUN_DEV_NAME, nla_get_string(name_attr)) == 0) {
+                printf("This is our 'tun0' tunnel!  Interface index = %d\n", ifmsghdr->ifi_index);
 
-            if (configure_tunnel(ifmsghdr->ifi_index, msgsock) < 0) {
-                perror("ERROR Setting tunnel address and state");
+                if (configure_tunnel(ifmsghdr->ifi_index, msgsock) < 0) {
+                    perror("ERROR Setting tunnel address and state");
+                }
             }
         }
-
         break;
     }
     case RTM_DELLINK:
@@ -267,12 +281,10 @@ int main(int argc, char** argv) {
         perror("ERROR Setting notification callback function");
         return -1;
     }
-    /*
     if (nl_socket_modify_cb(message_sock, NL_CB_VALID, NL_CB_CUSTOM, link_response_cb, NULL) != 0) {
         perror("ERROR Setting response callback function");
         return -1;
     }
-    */
 
     // Connect to the routing protocol
     if (nl_connect(notification_sock, NETLINK_ROUTE) != 0) {
@@ -295,34 +307,57 @@ int main(int argc, char** argv) {
     if (pthread_create(&notification_thread, NULL, recv_msg_func, (void*)notification_sock) != 0) {
         perror("ERROR Creating notification message thread");
     }
-    /*
-    pthread_t response_thread;
-    if (pthread_create(&response_thread, NULL, recv_msg_func, (void*)message_sock) != 0) {
-        perror("ERROR Creating notification message thread");
-    }
-    */
 
-    /*
     char devname[IFNAMSIZ];
-    strcpy(devname, "tun0");
-    if (tun_alloc(devname) < 0) {
+    strncpy(devname, "tun0", IFNAMSIZ);
+    int tunfd;
+    if ((tunfd = tun_alloc(devname)) < 0) {
         return -1;
     }
+
+    int tun_idx = get_tun_link_index(message_sock);
+    if (tun_idx == -1) {
+        perror("Could not find our tun device!");
+        exit(1);
+    }
+    // Can only do this as root
+    //configure_tunnel(tun_idx, message_sock);
+
+    //get_routes(message_sock);
+
+    /*
+    if (pthread_join(response_thread, &retval) != 0) {
+        perror("ERROR Joining response message thread");
+    }
     */
 
-    get_links(message_sock);
-    get_routes(message_sock);
+    uint8_t buf[BUFSIZE];
+    while (1) {
+        int ret;
+
+        fd_set readset;
+        FD_ZERO(&readset);
+        FD_SET(tunfd, &readset);
+
+        ret = select(tunfd + 1, &readset, NULL, NULL, NULL);
+        if (ret < 0) {
+            if (errno = EINTR)
+                continue;
+            else 
+                perror("Error in select()");
+        }
+
+        if (FD_ISSET(tunfd, &readset)) {
+          int numread = read(tunfd, buf, BUFSIZE);
+          printf("Numread = %d\n", numread);
+        }
+    }
 
     // Join the recv message thread before exiting
     void* retval;
     if (pthread_join(notification_thread, &retval) != 0) {
         perror("ERROR Joining notification message thread");
     }
-    /*
-    if (pthread_join(response_thread, &retval) != 0) {
-        perror("ERROR Joining response message thread");
-    }
-    */
 
     return 0;
 }
