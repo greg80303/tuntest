@@ -34,6 +34,9 @@ AC_SUBST(NL_LIBS)
 PKG_CHECK_MODULES([NLROUTE], [libnl-route-3.0], [], [AC_MSG_ERROR([Could not find libnl-route-3.0])])
 AC_SUBST(NLROUTE_CFLAGS)
 AC_SUBST(NLROUTE_LIBS)
+PKG_CHECK_MODULES([NLGENL], [libnl-genl-3.0], [], [AC_MSG_ERROR([Could not find libnl-genl-3.0])])
+AC_SUBST(NLGENL_CFLAGS)
+AC_SUBST(NLGENL_LIBS)
 
 # Checks for header files.
 AC_CHECK_HEADERS()

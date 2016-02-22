@@ -13,6 +13,8 @@
 #include <netlink/msg.h>
 #include <netlink/netlink.h>
 #include <netlink/cache.h>
+#include <netlink/genl/genl.h>
+#include <netlink/genl/ctrl.h>
 #include <netlink/route/addr.h>
 #include <netlink/route/link.h>
 #include <netlink/route/route.h>
@@ -234,6 +236,12 @@ static int link_notification_cb(struct nl_msg *msg, void *arg) {
     return 0;
 }
 
+static int genl_response_cb(struct nl_msg *msg, void *arg) {
+
+    struct nl_sock *genlsock = (struct nl_sock*)arg;
+    struct nlmsghdr* msghdr = nlmsg_hdr(msg);
+}
+
 static int link_response_cb(struct nl_msg *msg, void *arg) {
 
     struct nlmsghdr* msghdr = nlmsg_hdr(msg);
@@ -263,12 +271,13 @@ int main(int argc, char** argv) {
 
     // Allocate socket
     struct nl_sock *notification_sock;
-    struct nl_sock *message_sock;
+    struct nl_sock *genl_sock;
+    struct nl_sock *route_sock;
     if ((notification_sock = nl_socket_alloc()) == NULL) {
         perror("ERROR Allocating notification socket");
         return -1;
     }
-    if ((message_sock = nl_socket_alloc()) == NULL) {
+    if ((route_sock = nl_socket_alloc()) == NULL) {
         perror("ERROR Allocating response socket");
         return -1;
     }
@@ -277,11 +286,15 @@ int main(int argc, char** argv) {
     nl_socket_disable_seq_check(notification_sock);
 
     // Set our callback function on the socket
-    if (nl_socket_modify_cb(notification_sock, NL_CB_VALID, NL_CB_CUSTOM, link_notification_cb, (void*)message_sock) != 0) {
+    if (nl_socket_modify_cb(notification_sock, NL_CB_VALID, NL_CB_CUSTOM, link_notification_cb, (void*)route_sock) != 0) {
         perror("ERROR Setting notification callback function");
         return -1;
     }
-    if (nl_socket_modify_cb(message_sock, NL_CB_VALID, NL_CB_CUSTOM, link_response_cb, NULL) != 0) {
+    if (nl_socket_modify_cb(route_sock, NL_CB_VALID, NL_CB_CUSTOM, link_response_cb, NULL) != 0) {
+        perror("ERROR Setting response callback function");
+        return -1;
+    }
+    if (nl_socket_modify_cb(genl_sock, NL_CB_VALID, NL_CB_CUSTOM, genl_response_cb, NULL) != 0) {
         perror("ERROR Setting response callback function");
         return -1;
     }
@@ -291,9 +304,19 @@ int main(int argc, char** argv) {
         perror("ERROR Connecting to NETLINK_ROUTE protocol");
         return -1;
     }
-    if (nl_connect(message_sock, NETLINK_ROUTE) != 0) {
+    if (nl_connect(route_sock, NETLINK_ROUTE) != 0) {
         perror("ERROR Connecting to NETLINK_ROUTE protocol");
         return -1;
+    }
+    if (nl_connect(genl_sock, NETLINK_GENERIC) != 0) {
+        perror("ERROR Connecting to NETLINK_ROUTE protocol");
+        return -1;
+    }
+
+    int gen80211id;
+    if ((gen80211id = genl_ctrl_resolve(genl_sock,  "nl80211")) < 0) {
+        perror("ERROR resolving 'nl80211' family ID");
+        return -1; 
     }
 
     // Subscribe to LINK notifications
@@ -315,7 +338,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    int tun_idx = get_tun_link_index(message_sock);
+    int tun_idx = get_tun_link_index(route_sock);
     if (tun_idx == -1) {
         perror("Could not find our tun device!");
         exit(1);
